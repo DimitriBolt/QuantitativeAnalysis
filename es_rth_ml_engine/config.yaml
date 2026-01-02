@@ -1,0 +1,29 @@
+data:
+  input_csv: "data/es_1m.csv"          # you provide this
+  output_parquet: "data/es_1m.parquet" # created by pipeline
+  timestamp_col: "timestamp"           # column name in your csv
+  tz_input: "UTC"                      # timezone of your CSV timestamps: "UTC" or "America/New_York"
+  symbol: "ES"
+
+session:
+  rth_tz: "America/New_York"
+  rth_start: "09:30"
+  rth_end: "16:00"
+
+research:
+  horizon_bars: 5                      # label horizon (5 minutes)
+  walkforward:
+    train_days: 126                    # ~6 months of trading days
+    test_days: 21                      # ~1 month of trading days
+    step_days: 21                      # roll forward monthly
+
+model:
+  type: "logreg"                       # baseline; swap later
+  prob_threshold: 0.52                 # trade if p(up) > threshold
+
+backtest:
+  point_value: 50.0                    # ES = $50 per point
+  tick_size: 0.25
+  slippage_ticks: 1                    # conservative
+  commission_per_side: 2.10            # example; set your number
+  max_position: 1                      # 1 contract
