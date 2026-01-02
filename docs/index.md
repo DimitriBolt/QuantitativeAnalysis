@@ -1,0 +1,1 @@
+- 2026-01-02 — Project structure migrated to the recommended layout. (see: docs/logbook/2026-01-02.md)
