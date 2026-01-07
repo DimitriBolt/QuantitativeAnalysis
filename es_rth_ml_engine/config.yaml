@@ -1,9 +1,10 @@
 data:
-  input_csv: "data/es_1m.csv"          # you provide this
-  output_parquet: "data/es_1m.parquet" # created by pipeline
-  timestamp_col: "timestamp"           # column name in your csv
-  tz_input: "UTC"                      # timezone of your CSV timestamps: "UTC" or "America/New_York"
-  symbol: "ES"
+  tickers: [ "ESH26.CME", "ESM26.CME", "ESU26.CME" ]   # yfinance tickers to download
+  symbol: "ESH26.CME"                               # which one to actually research
+  interval: "1m"
+  period: "7d"
+  auto_adjust: false
+  progress: false
 
 session:
   rth_tz: "America/New_York"
@@ -11,19 +12,27 @@ session:
   rth_end: "16:00"
 
 research:
-  horizon_bars: 5                      # label horizon (5 minutes)
+  horizon_bars: 5
   walkforward:
-    train_days: 126                    # ~6 months of trading days
-    test_days: 21                      # ~1 month of trading days
-    step_days: 21                      # roll forward monthly
+    train_days: 6
+    test_days: 1
+    step_days: 1
 
 model:
-  type: "logreg"                       # baseline; swap later
-  prob_threshold: 0.52                 # trade if p(up) > threshold
+  type: "logreg"
+  prob_threshold: 0.52
 
 backtest:
-  point_value: 50.0                    # ES = $50 per point
+  point_value: 50.0
   tick_size: 0.25
-  slippage_ticks: 1                    # conservative
-  commission_per_side: 2.10            # example; set your number
-  max_position: 1                      # 1 contract
+  slippage_ticks: 1
+  commission_per_side: 2.10
+  max_position: 1
+
+debug:
+  # All OFF by default (None / empty)
+  save_raw_snapshot_parquet:
+  save_rth_snapshot_parquet:
+  save_model_table_parquet:
+  save_trades_csv:
+  save_equity_csv:

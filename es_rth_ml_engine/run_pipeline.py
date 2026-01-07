@@ -1,8 +1,20 @@
+# run_pipeline.py
+
+from __future__ import annotations
+
 import os
+from typing import List, Dict
+
 import yaml
 import pandas as pd
+from pandas import DataFrame
 
-from src.data_io import load_csv_bars, save_parquet, load_parquet
+from src.data_io import (
+    YFDownloadSpec,
+    download_yf_bars,
+    extract_symbol_frame,
+    maybe_save_debug_snapshot,
+)
 from src.sessions import filter_rth
 from src.features import make_features
 from src.labels import make_labels
@@ -11,22 +23,45 @@ from src.model import fit_predict_proba
 from src.backtest import run_backtest
 from src.metrics import summarize_equity
 
-def main():
+
+def main() -> None:
+    """
+    In-memory pipeline:
+    1) Download 1-minute bars from yfinance
+    2) Filter to RTH (9:30–16:00 ET)
+    3) Build causal features + labels
+    4) Walk-forward splits
+    5) Train model + generate signals
+    6) Run backtest + summary
+    """
     with open("config.yaml", "r") as f:
-        cfg = yaml.safe_load(f)
+        cfg: Dict = yaml.safe_load(f)
 
-    os.makedirs("data", exist_ok=True)
-
-    # 1) Load CSV and write Parquet (one-time, but safe to rerun)
-    df = load_csv_bars(
-        path=cfg["data"]["input_csv"],
-        timestamp_col=cfg["data"]["timestamp_col"],
-        tz_input=cfg["data"]["tz_input"],
+    # -----------------------------
+    # 1) Download bars (in memory)
+    # -----------------------------
+    yf_spec: YFDownloadSpec = YFDownloadSpec(
+        tickers=cfg["data"]["tickers"],
+        interval=cfg["data"]["interval"],
+        period=cfg["data"]["period"],
+        auto_adjust=cfg["data"]["auto_adjust"],
+        progress=cfg["data"]["progress"],
     )
-    save_parquet(df, cfg["data"]["output_parquet"])
 
-    # 2) Load Parquet + filter to RTH (9:30–16:00 ET)
-    df = load_parquet(cfg["data"]["output_parquet"])
+    df_raw: DataFrame = download_yf_bars(yf_spec)
+
+    # Optional: save raw snapshot for debugging (OFF by default)
+    maybe_save_debug_snapshot(df_raw, cfg["debug"].get("save_raw_snapshot_parquet"))
+
+    # -----------------------------
+    # 2) Choose one symbol to research
+    # -----------------------------
+    symbol: str = cfg["data"]["symbol"]
+    df: DataFrame = extract_symbol_frame(df_raw, symbol=symbol)
+
+    # -----------------------------
+    # 3) Filter to RTH
+    # -----------------------------
     df = filter_rth(
         df,
         tz=cfg["session"]["rth_tz"],
@@ -34,16 +69,27 @@ def main():
         end=cfg["session"]["rth_end"],
     )
 
-    # 3) Features + labels (causal)
-    X = make_features(df)
-    y = make_labels(df, horizon=cfg["research"]["horizon_bars"])
+    maybe_save_debug_snapshot(df, cfg["debug"].get("save_rth_snapshot_parquet"))
 
-    # Align
-    data = df.join(X, how="inner").join(y, how="inner")
-    feature_cols = X.columns.tolist()
+    # -----------------------------
+    # 4) Features + labels (causal)
+    # -----------------------------
+    X: DataFrame = make_features(df)
+    y: DataFrame = make_labels(df, horizon=cfg["research"]["horizon_bars"])
+
+    # Align bars + features + labels
+    data: DataFrame = df.join(X, how="inner").join(y, how="inner")
+    feature_cols: List[str] = X.columns.tolist()
+
+    # Drop rows with missing values in features/labels
     data = data.dropna(subset=feature_cols + ["y_up"])
 
-    # 4) Walk-forward training/testing
+    # Optional: save modeling table snapshot
+    maybe_save_debug_snapshot(data, cfg["debug"].get("save_model_table_parquet"))
+
+    # -----------------------------
+    # 5) Walk-forward splits
+    # -----------------------------
     splits = make_walkforward_splits(
         data.index,
         train_days=cfg["research"]["walkforward"]["train_days"],
@@ -52,13 +98,22 @@ def main():
         tz=cfg["session"]["rth_tz"],
     )
 
-    # 5) Run folds, collect signals
-    all_trades = []
-    all_equity = []
+    if not splits:
+        raise ValueError(
+            "No walk-forward splits could be created. "
+            "Common causes: not enough days in the downloaded sample. "
+            "Try increasing period (if allowed) or reducing train/test windows."
+        )
+
+    # -----------------------------
+    # 6) Run folds, collect outputs
+    # -----------------------------
+    all_trades: List[DataFrame] = []
+    all_equity: List[DataFrame] = []
 
     for i, (train_idx, test_idx) in enumerate(splits, start=1):
-        train = data.loc[train_idx]
-        test = data.loc[test_idx]
+        train: DataFrame = data.loc[train_idx]
+        test: DataFrame = data.loc[test_idx]
 
         proba = fit_predict_proba(
             X_train=train[feature_cols],
@@ -69,37 +124,53 @@ def main():
 
         test = test.copy()
         test["p_up"] = proba
-        test["signal"] = (test["p_up"] > cfg["model"]["prob_threshold"]).astype(int)  # long-only baseline
+        test["signal"] = (test["p_up"] > cfg["model"]["prob_threshold"]).astype(int)
 
         bt = run_backtest(
             bars=test,
             signal_col="signal",
-            point_value=cfg["backtest"]["point_value"],
-            tick_size=cfg["backtest"]["tick_size"],
-            slippage_ticks=cfg["backtest"]["slippage_ticks"],
-            commission_per_side=cfg["backtest"]["commission_per_side"],
-            max_position=cfg["backtest"]["max_position"],
+            point_value=float(cfg["backtest"]["point_value"]),
+            tick_size=float(cfg["backtest"]["tick_size"]),
+            slippage_ticks=int(cfg["backtest"]["slippage_ticks"]),
+            commission_per_side=float(cfg["backtest"]["commission_per_side"]),
+            max_position=int(cfg["backtest"]["max_position"]),
         )
 
-        bt["fold"] = i
-        all_trades.append(bt["trades"])
-        all_equity.append(bt["equity_curve"])
+        bt_trades: DataFrame = bt["trades"].copy()
+        bt_equity: DataFrame = bt["equity_curve"].copy()
 
-        print(f"Fold {i}: trades={len(bt['trades'])}, net_pnl=${bt['equity_curve']['equity'].iloc[-1]:,.2f}")
+        bt_trades["fold"] = i
+        bt_equity["fold"] = i
 
-    trades = pd.concat(all_trades, axis=0).sort_index()
-    equity = pd.concat(all_equity, axis=0).sort_index()
+        all_trades.append(bt_trades)
+        all_equity.append(bt_equity)
+
+        net_pnl_last: float = float(bt_equity["equity"].iloc[-1])
+        print(f"Fold {i}: trades={len(bt_trades)}, net_pnl=${net_pnl_last:,.2f}")
+
+    trades: DataFrame = pd.concat(all_trades, axis=0).sort_index()
+    equity: DataFrame = pd.concat(all_equity, axis=0).sort_index()
+
     summary = summarize_equity(equity, trades)
 
     print("\n=== SUMMARY (all folds combined) ===")
     for k, v in summary.items():
         print(f"{k}: {v}")
 
-    # Save outputs
-    os.makedirs("reports", exist_ok=True)
-    trades.to_csv("reports/trades.csv")
-    equity.to_csv("reports/equity.csv")
-    print("\nWrote reports/trades.csv and reports/equity.csv")
+    # Optional output files (OFF by default)
+    out_trades_csv: str | None = cfg["debug"].get("save_trades_csv")
+    out_equity_csv: str | None = cfg["debug"].get("save_equity_csv")
+
+    if out_trades_csv:
+        os.makedirs(os.path.dirname(out_trades_csv) or ".", exist_ok=True)
+        trades.to_csv(out_trades_csv)
+        print(f"Wrote {out_trades_csv}")
+
+    if out_equity_csv:
+        os.makedirs(os.path.dirname(out_equity_csv) or ".", exist_ok=True)
+        equity.to_csv(out_equity_csv)
+        print(f"Wrote {out_equity_csv}")
+
 
 if __name__ == "__main__":
     main()
