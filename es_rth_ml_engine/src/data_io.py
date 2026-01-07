@@ -81,7 +81,7 @@ def download_yf_bars(spec: YFDownloadSpec) -> DataFrame:
         progress=spec.progress,
         group_by=spec.group_by,
         threads=True,
-    )
+    ) # The main point where I download row data.
 
     if df_raw is None or df_raw.empty:
         raise ValueError(

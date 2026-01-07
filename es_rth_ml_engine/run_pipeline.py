@@ -87,6 +87,22 @@ def main() -> None:
     # Optional: save modeling table snapshot
     maybe_save_debug_snapshot(data, cfg["debug"].get("save_model_table_parquet"))
 
+    # --- Diagnostics: how many unique trading days do I actually have? ---
+    idx = data.index
+    local = idx.tz_convert(cfg["session"]["rth_tz"])
+    unique_days = pd.DatetimeIndex(local.normalize().unique()).sort_values()
+
+    print(f"Bars after RTH+features+labels: {len(data):,}")
+    print(f"Unique trading days available: {len(unique_days)}")
+    if len(unique_days) > 0:
+        print(f"Day range: {unique_days[0].date()} -> {unique_days[-1].date()}")
+    print(
+        "Need at least train_days + test_days = "
+        f"{cfg['research']['walkforward']['train_days'] + cfg['research']['walkforward']['test_days']} "
+        "unique days."
+    )
+    # -------------------------------------------
+
     # -----------------------------
     # 5) Walk-forward splits
     # -----------------------------
